@@ -32,74 +32,112 @@ def solve_zero_sum_game(A, tol=1e-8):
     """
     Solve a two-player zero-sum game using support enumeration.
     
-    Input:
-        A : 2D numpy array of shape (m, n)
-            Payoff matrix for Player 1 (row player).
-    
-    Output:
-        p : 1D numpy array of length m
-            Optimal mixed strategy for Player 1.
-        q : 1D numpy array of length n
-            Optimal mixed strategy for Player 2.
-        v : float
-            Value of the game for Player 1.
+    This method uses ONLY linear algebra (numpy) and NO linear programming.
+    It is the mathematically correct equilibrium-finding method for
+    small games (2×2, 3×3, 4×4).
+
+    ----------------------------------------------------
+    IDEA OF SUPPORT ENUMERATION (IN MATH TERMS)
+    ----------------------------------------------------
+    A zero-sum game has a payoff matrix A (m × n).
+    A mixed strategy equilibrium (p*, q*, v) satisfies:
+
+        For every row i in the support of p:
+            (A q*)_i = v          (equal payoff)
+        For every other row k:
+            (A q*)_k ≤ v          (no profitable deviation)
+
+        For every column j in the support of q:
+            (p^T A)_j = v         (equal payoff)
+        For every other column ℓ:
+            (p^T A)_ℓ ≥ v         (column player can't reduce value)
+
+    Because rows in support must give the EXACT SAME payoff v,
+    we can solve the equalities using linear equations.
+
+    The unknowns are:
+        - probabilities p over support S
+        - probabilities q over support T
+        - the game value v
+
+    Once a FEASIBLE solution satisfies all inequalities,
+    we have found the Nash equilibrium.
     """
+
     A = np.array(A, dtype=float)
     m, n = A.shape
 
-    # Helper to normalize a probability vector and clip small negatives
+    # Utility function: normalize probability vectors
     def normalize_prob(x):
+        """
+        Ensures all probabilities are >= 0 and sum to 1.
+        If impossible, return None.
+        """
         x = np.array(x, dtype=float)
-        x[x < 0] = 0.0
+        x[x < 0] = 0
         s = x.sum()
         if s < tol:
-            return None  # invalid
+            return None
         return x / s
 
-    # Try supports of size 1, 2, ..., min(m, n)
+    # Maximum support size = min(m, n)
     max_support_size = min(m, n)
 
+    # Try support sizes 1, 2, ..., k
     for k in range(1, max_support_size + 1):
-        # All subsets S of rows, size k
+
+        # Enumerate all supports S ⊆ rows, |S| = k
         for S in itertools.combinations(range(m), k):
-            # All subsets T of columns, size k
+
+            # Enumerate all supports T ⊆ columns, |T| = k
             for T in itertools.combinations(range(n), k):
+
                 S = list(S)
                 T = list(T)
 
-                # Extract the k x k submatrix A_ST
+                # Submatrix A_ST (k × k)
                 A_ST = A[np.ix_(S, T)]
 
-                # === Step 1: Solve for q_T and v from row-player's perspective ===
-                # Equations:
-                # For each i in S: sum_{j in T} A[i,j] * q_j - v = 0   (k equations)
-                # Plus: sum_{j in T} q_j = 1                          (1 equation)
+                # --------------------------------------------------------
+                # PART 1 — Solve for q_T and v so that rows in S tie at v
+                # --------------------------------------------------------
                 #
-                # Unknowns: q_T (k variables), v (1 variable) => k+1 unknowns
-                # Build matrix M_q (shape (k+1, k+1)) and vector b_q (shape (k+1,))
+                # For each row i ∈ S:
+                #       sum_{j∈T}  A[i,j] * q[j] = v
+                #
+                # Plus normalization:
+                #       sum_{j∈T} q[j] = 1
+                #
+                # Unknowns: q_T (length k) and v → total k+1 unknowns.
+                #
+                # Write system in matrix form:
+                #     [ A_ST    |  -1 ] [q] = [0]
+                #     [  1      |   0 ] [v]   [1]
+                #
+                # This is (k+1) × (k+1).
+                #
+
                 M_q = np.zeros((k + 1, k + 1))
                 b_q = np.zeros(k + 1)
 
-                # Rows 0..k-1: A_ST[i,:] * q - v = 0
-                # Columns 0..k-1 for q, last column for v
-                M_q[0:k, 0:k] = A_ST
-                M_q[0:k, -1] = -1.0  # coefficient of v
-                b_q[0:k] = 0.0
+                # Equality: A_ST * q - v = 0
+                M_q[:k, :k] = A_ST
+                M_q[:k, -1] = -1  # coefficient of v
 
-                # Last equation: sum q_j = 1
-                M_q[-1, 0:k] = 1.0
-                M_q[-1, -1] = 0.0
-                b_q[-1] = 1.0
+                # Normalization: sum(q) = 1
+                M_q[-1, :k] = 1
+                b_q[-1] = 1
 
-                # Try to solve M_q x_q = b_q
+                # Solve for q_T and v
                 try:
                     x_q = np.linalg.solve(M_q, b_q)
                 except np.linalg.LinAlgError:
-                    continue  # singular system, skip this support pair
+                    continue
 
-                q_T = x_q[0:k]
+                q_T = x_q[:k]
                 v_q = x_q[-1]
 
+                # Normalize q
                 q_T = normalize_prob(q_T)
                 if q_T is None:
                     continue
@@ -108,75 +146,81 @@ def solve_zero_sum_game(A, tol=1e-8):
                 q = np.zeros(n)
                 q[T] = q_T
 
-                # Check row best-response conditions:
-                #   payoff_i = (A q)_i
-                #   For i in S: payoff_i ≈ v
-                #   For i not in S: payoff_i <= v + tol
-                row_payoffs = A @ q  # shape (m,)
+                # Check row best-response inequalities
+                row_payoffs = A @ q
+                # Rows in S must equal v
                 if not np.all(np.abs(row_payoffs[S] - v_q) <= 1e-5):
                     continue
-                if np.any(row_payoffs[[i for i in range(m) if i not in S]] > v_q + 1e-5):
-                    continue
+                # Other rows must be ≤ v
+                remaining_rows = [i for i in range(m) if i not in S]
+                if remaining_rows:
+                    if np.any(row_payoffs[remaining_rows] > v_q + 1e-5):
+                        continue
 
-                # === Step 2: Solve for p_S and v from column-player's perspective ===
-                # Equations:
-                # For each j in T: sum_{i in S} p_i * A[i,j] - v = 0   (k equations)
-                # Plus: sum_{i in S} p_i = 1                          (1 equation)
+                # --------------------------------------------------------
+                # PART 2 — Solve for p_S and v so that columns in T tie
+                # --------------------------------------------------------
                 #
-                # Unknowns: p_S (k vars), v (1 var)
+                # For each column j ∈ T:
+                #       sum_{i∈S} p[i] A[i,j] = v
+                #
+                # Plus normalization:
+                #       sum_{i∈S} p[i] = 1
+                #
+                # Unknowns: p_S (length k) and v → k+1 unknowns.
+                #
+                # System:
+                #     [ A_ST^T | -1 ] [p_S] = [0]
+                #     [   1    |  0 ] [ v ]   [1]
+                #
+
                 M_p = np.zeros((k + 1, k + 1))
                 b_p = np.zeros(k + 1)
 
-                # Columns 0..k-1 for p, last column for v
-                # For each j in T, equation: sum_i p_i * A[i,j] - v = 0
-                # That is (p^T A_ST[:, j_idx]) - v = 0
-                for j_idx in range(k):
-                    M_p[j_idx, 0:k] = A_ST[:, j_idx]
-                    M_p[j_idx, -1] = -1.0
-                    b_p[j_idx] = 0.0
+                # Column equalities: p^T A[:,j] = v
+                # i.e. A_ST rows correspond to S
+                M_p[:k, :k] = A_ST.T
+                M_p[:k, -1] = -1
 
-                # Last equation: sum p_i = 1
-                M_p[-1, 0:k] = 1.0
-                M_p[-1, -1] = 0.0
-                b_p[-1] = 1.0
+                # Normalization: sum(p) = 1
+                M_p[-1, :k] = 1
+                b_p[-1] = 1
 
                 try:
                     x_p = np.linalg.solve(M_p, b_p)
                 except np.linalg.LinAlgError:
                     continue
 
-                p_S = x_p[0:k]
+                p_S = x_p[:k]
                 v_p = x_p[-1]
 
                 p_S = normalize_prob(p_S)
                 if p_S is None:
                     continue
 
-                # Check that v from both sides is (approximately) the same
+                # v must be consistent
                 if abs(v_p - v_q) > 1e-5:
                     continue
 
                 v = 0.5 * (v_p + v_q)
 
-                # Build full p vector
+                # Build full p
                 p = np.zeros(m)
                 p[S] = p_S
 
-                # Check column best-response conditions:
-                #   col_payoff_j = (p^T A)_j
-                #   For j in T: col_payoff_j ≈ v
-                #   For j not in T: col_payoff_j >= v - tol
-                col_payoffs = p @ A  # shape (n,)
+                # Check column inequalities
+                col_payoffs = p @ A
                 if not np.all(np.abs(col_payoffs[T] - v) <= 1e-5):
                     continue
-                if np.any(col_payoffs[[j for j in range(n) if j not in T]] < v - 1e-5):
-                    continue
+                remaining_cols = [j for j in range(n) if j not in T]
+                if remaining_cols:
+                    if np.any(col_payoffs[remaining_cols] < v - 1e-5):
+                        continue
 
-                # If we reach here, (p, q, v) is a valid equilibrium
+                # If all checks pass → equilibrium found
                 return p, q, float(v)
 
-    # If no support pair works, something is wrong (or the game is degenerate)
-    raise ValueError("No equilibrium found by support enumeration (possible degeneracy).")
+    raise ValueError("No equilibrium found via support enumeration (degenerate game?).")
 
 
 
