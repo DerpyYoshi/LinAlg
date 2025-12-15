@@ -24,95 +24,206 @@ Core function for two player zero sum game using linear programming:
             - v = 0 : fair game
             - v < 0 : game favors Player 2
 """
+
 import numpy as np
-from scipy.optimize import linprog
+import itertools
 
-def solve_zero_sum_game(A):
+def solve_zero_sum_game(A, tol=1e-8):
     """
-    Solve a two-player zero-sum game.
+    Solve a two-player zero-sum game using support enumeration.
     
-    Input:
-        A = payoff matrix for Player 1 (rows)
-        
-    Output:
-        p = optimal strategy for Player 1
-        q = optimal strategy for Player 2
-        v = game value (expected payoff)
+    This method uses ONLY linear algebra (numpy) and NO linear programming.
+    It is the mathematically correct equilibrium-finding method for
+    small games (2×2, 3×3, 4×4).
+
+    ----------------------------------------------------
+    IDEA OF SUPPORT ENUMERATION (IN MATH TERMS)
+    ----------------------------------------------------
+    A zero-sum game has a payoff matrix A (m × n).
+    A mixed strategy equilibrium (p*, q*, v) satisfies:
+
+        For every row i in the support of p:
+            (A q*)_i = v          (equal payoff)
+        For every other row k:
+            (A q*)_k ≤ v          (no profitable deviation)
+
+        For every column j in the support of q:
+            (p^T A)_j = v         (equal payoff)
+        For every other column ℓ:
+            (p^T A)_ℓ ≥ v         (column player can't reduce value)
+
+    Because rows in support must give the EXACT SAME payoff v,
+    we can solve the equalities using linear equations.
+
+    The unknowns are:
+        - probabilities p over support S
+        - probabilities q over support T
+        - the game value v
+
+    Once a FEASIBLE solution satisfies all inequalities,
+    we have found the Nash equilibrium.
     """
+
     A = np.array(A, dtype=float)
-    m, n = A.shape  # m = number of rows, n = number of columns
-    
-    # --- Solve for Player 1 (maximize v) ---
-    # We want: maximize v
-    # Where: sum(p[i] * A[i,j]) >= v for all j 
-    #       -> meaing if player 1 randomizes with probability, then even with player 2's best move player 1 still gets >= v (at least v)
+    m, n = A.shape
 
-    #             sum(p[i]) = 1  -> meaning sum of prob is 1
+    # Utility function: normalize probability vectors
+    def normalize_prob(x):
+        """
+        Ensures all probabilities are >= 0 and sum to 1.
+        If impossible, return None.
+        """
+        x = np.array(x, dtype=float)
+        x[x < 0] = 0
+        s = x.sum()
+        if s < tol:
+            return None
+        return x / s
 
-    #             p[i] >= 0  -> meaning prob cant be neg
-    
-    # linprog minimizes, so we minimize "-v"
-    c = np.zeros(m + 1)
-    c[-1] = -1  # minimize "-v" (which maximizes v)
-    
-    # Inequality constraints: "-sum(p[i] * A[i,j])" + v <= 0
-    A_ub = np.hstack([-A.T, np.ones((n, 1))])
-    b_ub = np.zeros(n)
-    
-    # Equality constraint: sum(p[i]) = 1
-    A_eq = np.zeros((1, m + 1))
-    A_eq[0, :m] = 1
-    b_eq = np.array([1])
-    
-    # Bounds: p[i] >= 0, v is free
-    bounds = [(0, None)] * m + [(None, None)]
-    
-    # Solve
-    result = linprog(c, A_ub=A_ub, b_ub=b_ub, A_eq=A_eq, b_eq=b_eq, bounds=bounds, method='highs')
-    
-    if not result.success:
-        raise ValueError("Could not solve for Player 1")
-    
-    p = result.x[:m]  # get the probabilities
-    v = result.x[-1]  # get the game value
-    
-    # idk what this does tbh
-    p[p < 0] = 0
-    p = p / p.sum()  # normalize to sum to 1
-    
-    # --- Solve for Player 2 (minimize v) ---
-    # Player 2 wants to minimize Player 1's payoff
-    # We can solve the same problem with matrix -A.T -> taking transpose of A and multiply by -1 thus flipping the matrix
-    
-    B = -A.T  # flip the game for Player 2
-    
-    # Same setup but for Player 2
-    c2 = np.zeros(n + 1)
-    c2[-1] = -1
-    
-    A_ub2 = np.hstack([-B.T, np.ones((m, 1))])
-    b_ub2 = np.zeros(m)
-    
-    A_eq2 = np.zeros((1, n + 1))
-    A_eq2[0, :n] = 1
-    b_eq2 = np.array([1])
-    
-    bounds2 = [(0, None)] * n + [(None, None)]
-    
-    # vaguely understand this
-    result2 = linprog(c2, A_ub=A_ub2, b_ub=b_ub2, A_eq=A_eq2, b_eq=b_eq2,
-                      bounds=bounds2, method='highs')
-    
-    if not result2.success:
-        raise ValueError("Could not solve for Player 2")
-    
-    q = result2.x[:n]
-    q[q < 0] = 0
-    q = q / q.sum()
-    
-    return p, q, v
+    # Maximum support size = min(m, n)
+    max_support_size = min(m, n)
+
+    # Try support sizes 1, 2, ..., k
+    for k in range(1, max_support_size + 1):
+
+        # Enumerate all supports S ⊆ rows, |S| = k
+        for S in itertools.combinations(range(m), k):
+
+            # Enumerate all supports T ⊆ columns, |T| = k
+            for T in itertools.combinations(range(n), k):
+
+                S = list(S)
+                T = list(T)
+
+                # Submatrix A_ST (k × k)
+                A_ST = A[np.ix_(S, T)]
+
+                # --------------------------------------------------------
+                # PART 1 — Solve for q_T and v so that rows in S tie at v
+                # --------------------------------------------------------
+                #
+                # For each row i ∈ S:
+                #       sum_{j∈T}  A[i,j] * q[j] = v
+                #
+                # Plus normalization:
+                #       sum_{j∈T} q[j] = 1
+                #
+                # Unknowns: q_T (length k) and v → total k+1 unknowns.
+                #
+                # Write system in matrix form:
+                #     [ A_ST    |  -1 ] [q] = [0]
+                #     [  1      |   0 ] [v]   [1]
+                #
+                # This is (k+1) × (k+1).
+                #
+
+                M_q = np.zeros((k + 1, k + 1))
+                b_q = np.zeros(k + 1)
+
+                # Equality: A_ST * q - v = 0
+                M_q[:k, :k] = A_ST
+                M_q[:k, -1] = -1  # coefficient of v
+
+                # Normalization: sum(q) = 1
+                M_q[-1, :k] = 1
+                b_q[-1] = 1
+
+                # Solve for q_T and v
+                try:
+                    x_q = np.linalg.solve(M_q, b_q)
+                except np.linalg.LinAlgError:
+                    continue
+
+                q_T = x_q[:k]
+                v_q = x_q[-1]
+
+                # Normalize q
+                q_T = normalize_prob(q_T)
+                if q_T is None:
+                    continue
+
+                # Build full q vector
+                q = np.zeros(n)
+                q[T] = q_T
+
+                # Check row best-response inequalities
+                row_payoffs = A @ q
+                # Rows in S must equal v
+                if not np.all(np.abs(row_payoffs[S] - v_q) <= 1e-5):
+                    continue
+                # Other rows must be ≤ v
+                remaining_rows = [i for i in range(m) if i not in S]
+                if remaining_rows:
+                    if np.any(row_payoffs[remaining_rows] > v_q + 1e-5):
+                        continue
+
+                # --------------------------------------------------------
+                # PART 2 — Solve for p_S and v so that columns in T tie
+                # --------------------------------------------------------
+                #
+                # For each column j ∈ T:
+                #       sum_{i∈S} p[i] A[i,j] = v
+                #
+                # Plus normalization:
+                #       sum_{i∈S} p[i] = 1
+                #
+                # Unknowns: p_S (length k) and v → k+1 unknowns.
+                #
+                # System:
+                #     [ A_ST^T | -1 ] [p_S] = [0]
+                #     [   1    |  0 ] [ v ]   [1]
+                #
+
+                M_p = np.zeros((k + 1, k + 1))
+                b_p = np.zeros(k + 1)
+
+                # Column equalities: p^T A[:,j] = v
+                # i.e. A_ST rows correspond to S
+                M_p[:k, :k] = A_ST.T
+                M_p[:k, -1] = -1
+
+                # Normalization: sum(p) = 1
+                M_p[-1, :k] = 1
+                b_p[-1] = 1
+
+                try:
+                    x_p = np.linalg.solve(M_p, b_p)
+                except np.linalg.LinAlgError:
+                    continue
+
+                p_S = x_p[:k]
+                v_p = x_p[-1]
+
+                p_S = normalize_prob(p_S)
+                if p_S is None:
+                    continue
+
+                # v must be consistent
+                if abs(v_p - v_q) > 1e-5:
+                    continue
+
+                v = 0.5 * (v_p + v_q)
+
+                # Build full p
+                p = np.zeros(m)
+                p[S] = p_S
+
+                # Check column inequalities
+                col_payoffs = p @ A
+                if not np.all(np.abs(col_payoffs[T] - v) <= 1e-5):
+                    continue
+                remaining_cols = [j for j in range(n) if j not in T]
+                if remaining_cols:
+                    if np.any(col_payoffs[remaining_cols] < v - 1e-5):
+                        continue
+
+                # If all checks pass → equilibrium found
+                return p, q, float(v)
+
+    raise ValueError("No equilibrium found via support enumeration (degenerate game?).")
 
 
+# Test Cases:
 # --- Example: Rock-Paper-Scissors ---
 if __name__ == "__main__":
     # Payoff matrix for Player 1
@@ -147,6 +258,8 @@ if __name__ == "__main__":
     print(f"  Rock: {q[0]*100:.1f}%")
     print(f"  Paper: {q[1]*100:.1f}%")
     print(f"  Scissors: {q[2]*100:.1f}%")
+    print()
+    print()
 
 
 # --- General Examples ---
@@ -170,6 +283,8 @@ print()
 print(f"Player 2 should play:")
 print(f"  Move 1: {q[0]*100:.1f}%")
 print(f"  Move 2: {q[1]*100:.1f}%")
+print()
+print()
 
 # Example 2: A 3x2 game (3 strategies for P1, 2 for P2)
 print("=== 3x2 Game ===")
@@ -183,6 +298,16 @@ p, q, v = solve_zero_sum_game(A)
 print(f"Player 1 strategy: {p}")
 print(f"Player 2 strategy: {q}")
 print(f"Game value: {v}\n")
+print("Interpretation:")
+print(f"Player 1 should play:")
+print(f"  Move 1: {p[0]*100:.1f}%")
+print(f"  Move 2: {p[1]*100:.1f}%")
+print()
+print(f"Player 2 should play:")
+print(f"  Move 1: {q[0]*100:.1f}%")
+print(f"  Move 2: {q[1]*100:.1f}%")
+print()
+print()
 
 # Example 3: A 4x4 game
 print("=== 4x4 Game ===")
@@ -197,6 +322,20 @@ p, q, v = solve_zero_sum_game(A)
 print(f"Player 1 strategy: {p}")
 print(f"Player 2 strategy: {q}")
 print(f"Game value: {v}\n")
+print("Interpretation:")
+print(f"Player 1 should play:")
+print(f"  Move 1: {p[0]*100:.1f}%")
+print(f"  Move 2: {p[1]*100:.1f}%")
+print(f"  Move 3: {p[2]*100:.1f}%")
+print(f"  Move 4: {p[3]*100:.1f}%")
+print()
+print(f"Player 2 should play:")
+print(f"  Move 1: {q[0]*100:.1f}%")
+print(f"  Move 2: {q[1]*100:.1f}%")
+print(f"  Move 3: {q[2]*100:.1f}%")
+print(f"  Move 4: {q[3]*100:.1f}%")
+print()
+print()
 
 # Example 4: custom
 print("=== Custom Game ===")
